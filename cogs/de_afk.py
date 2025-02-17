@@ -1,115 +1,86 @@
 import os
-
 import aiosqlite
 import discord
 from discord.commands import Option
 from discord.ext import commands
-
-from utils import logger
-from utils import time
-from utils import duration
-from utils import bot
+from utils import logger, time, duration, bot
 
 log = logger.Logger.afkbot_logger
-bot = bot.Bot
 
 
 class DeAfk(commands.Cog):
+    """Cog for removing AFK status."""
 
     def __init__(self, bot):
         self.bot = bot
 
-    @discord.slash_command(name="de-afk", description="Remove your AFK status")
+    @discord.slash_command(name="de-afk", description="Remove your AFK status.")
     async def deafk(
         self,
-        ctx,
+        ctx: discord.ApplicationContext,
         quiet: Option(
             str,
-            description="Do you the bot to not announce your coming back?",
+            description="Do you want the bot to not announce your return?",
             required=True,
             choices=["Off", "On"],
         ),
     ):
+        """Removes AFK status from a user."""
+        log.debug(f"Received de-afk command from {ctx.user.id}, quiet mode: {quiet}")
 
-        log.debug(
-            f"Received de-afk command from user {ctx.user.name}, in channel {ctx.channel.id},"
-            f" quiet: {quiet}"
-        )
+        db_path = os.path.join(os.path.dirname(__file__), "..", "users.sqlite")
 
-        db = await aiosqlite.connect(
-            os.path.join(os.path.dirname(__file__), "..", "users.sqlite")
-        )
-        log.debug(f"Connected to database {db}")
-        query = "SELECT * FROM Afk WHERE :usr = usr"
-        log.debug(f"Query: {query}")
-        values = {"usr": ctx.user.id}
-        log.debug(f"Values: {values}")
-        log.debug(f"Checking if user {ctx.user.id} is in the database")
         try:
-            result = await db.execute_fetchall(query, values)
-            log.debug(f"User id result: {result[0][0]}")
-            log.debug(f"Channel id result: {result[0][5]}")
-        except IndexError:
-            log.debug(f"User {ctx.user.id} not found in database")
-            not_afk = discord.Embed(
-                title="Error: you are not AFK", color=discord.Color.red()
+            async with aiosqlite.connect(db_path) as db:
+                query = "SELECT * FROM Afk WHERE usr = ?"
+                result = await db.execute_fetchall(query, (ctx.user.id,))
+
+                if not result:
+                    log.debug(f"User {ctx.user.id} is not in the AFK database.")
+                    embed = discord.Embed(
+                        title="Error: You are not AFK.",
+                        color=discord.Color.red(),
+                    )
+                    await ctx.respond(embed=embed, ephemeral=True)
+                    return
+
+                log.debug(f"User {ctx.user.id} found in AFK database, proceeding with removal.")
+
+                await db.execute("DELETE FROM Afk WHERE usr = ?", (ctx.user.id,))
+                await db.commit()
+
+        except Exception as e:
+            log.error(f"Error removing AFK status for {ctx.user.id}: {e}")
+            embed = discord.Embed(
+                title="Error",
+                description="An unexpected error occurred while removing your AFK status.",
+                color=discord.Color.red(),
             )
-            await db.close()
-            log.debug(f"Closed database connection")
-            await ctx.respond(embed=not_afk, ephemeral=True)
-            log.debug(f"Sent error message to user {ctx.user.id}")
+            await ctx.respond(embed=embed, ephemeral=True)
             return
 
-        if quiet == "On":
-            log.debug("Setting quiet to 1 and deferring")
-            await ctx.defer(ephemeral=True)
-            quiet = 1
-        elif quiet == "Off":
-            log.debug("Setting quiet to 0 and deferring")
-            await ctx.defer(ephemeral=False)
-            quiet = 0
+        # Determine ephemeral response setting
+        is_ephemeral = True if quiet == "On" else False
+        log.debug(f"User {ctx.user.id} de-AFK successful, ephemeral={is_ephemeral}")
 
-        log.debug(f"User {ctx.user.id} is in the database")
-        query = "DELETE FROM Afk WHERE :usr = usr"
-        log.debug(f"Query: {query}")
-        values = {"usr": ctx.user.id}
-        log.debug(f"Values: {values}")
-        await db.execute(query, values)
-        log.debug(f"Executed query with values {values}")
-        await db.commit()
-        log.debug(f"Committed query")
-        await db.close()
-        log.debug(f"Closed database connection")
-
-        afk = discord.Embed(
-            title=f"Welcome back {ctx.user.nick}!", color=discord.Color.green()
-        )
-        log.debug(f"Created afk embed")
-        afk_duration_coroutine = duration.time_duration(
+        # Constructing success embed
+        afk_duration = await duration.time_duration(
             start_str=result[0][4], end_str=time.now()
         )
-        afk_duration = await afk_duration_coroutine
-        log.debug(
-            f"start_str: {result[0][4]}, end_str: {time.now()}, duration: {afk_duration}"
+
+        embed = discord.Embed(
+            title=f"Welcome back, {ctx.user.display_name}!",
+            color=discord.Color.green(),
         )
-        afk.add_field(name="You have been away for", value=afk_duration, inline=False)
-        log.debug(f"Added field with value {afk_duration} to deafk embed")
+        embed.add_field(name="You have been away for", value=afk_duration, inline=False)
+        embed.set_thumbnail(url=ctx.user.display_avatar.url)
+        embed.set_footer(text=f"Current UTC time: {time.now()}")
 
-        user = ctx.user
-        log.debug(f"Fetched user: {user}, id: {user.id}")
-        pfp = user.avatar.url
-        log.debug(f"Fetched avatar URL for {user}, URL: {pfp}")
-        afk.set_thumbnail(url=pfp)
-        log.debug(f"Set thumbnail to {pfp}")
-
-        afk.set_footer(text=f"Current UTC time: {time.now()}")
-        log.debug(f"Set footer to current UTC time: {time.now()}")
-
-        await ctx.respond(embed=afk, ephemeral=quiet)
-        log.debug(f"Responding, ephemeral = {quiet}")
-        log.info(f"User {user} is now marked as not afk")
+        await ctx.respond(embed=embed, ephemeral=is_ephemeral)
+        log.info(f"User {ctx.user.id} is now marked as not AFK.")
 
 
-def setup(bot):  # this is called by Pycord to set up the cog
-    log.debug("Running de-afk cog setup function")
-    bot.add_cog(DeAfk(bot))  # add the cog to the bot
+def setup(bot: commands.Bot):
+    """Setup function for the DeAfk cog."""
+    log.debug("Loading DeAfk cog.")
+    bot.add_cog(DeAfk(bot))
