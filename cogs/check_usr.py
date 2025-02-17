@@ -1,95 +1,87 @@
 import os
-
 import aiosqlite
 import discord
 from discord.ext import commands
-
-from utils import bot
-from utils import duration
-from utils import logger
-from utils import time
+from utils import bot, duration, logger, time
 
 log = logger.Logger.afkbot_logger
-bot = bot.Bot
 
 
 class CheckUSR(commands.Cog):
+    """Cog for checking if a user is AFK."""
 
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.slash_command(name="checkusr", description="Check if user is afk")
+    @commands.slash_command(name="checkusr", description="Check if a user is AFK.")
     async def checkusr(
         self,
-        ctx,
+        ctx: discord.ApplicationContext,
         member: discord.Option(
             discord.Member,
-            description="Check if a member is afk (leave blank to check yourself)",
+            description="Check if a member is AFK (leave blank to check yourself).",
             required=False,
         ),
     ):
-        if member is None:
-            member = ctx.user
-            log.debug(f"Member left blank, defaulting to {ctx.user.id}")
+        """Check if a user is AFK and return their status."""
+        member = member or ctx.user
+        log.debug(f"User {ctx.user.id} requested AFK status for {member.id}.")
 
-        log.debug(f"User {ctx.user.id} fetched {member}")
+        db_path = os.path.join(os.path.dirname(__file__), "..", "users.sqlite")
 
-        db = await aiosqlite.connect(
-            os.path.join(os.path.dirname(__file__), "..", "users.sqlite")
-        )
-        log.debug(f"Connected to database {db}")
-        query = "SELECT * FROM Afk WHERE :usr = usr"
-        log.debug(f"Query: {query}")
-        values = {"usr": member.id}
-        log.debug(f"Values: {values}")
-        log.debug(f"Checking if user {member.id} is in the database")
         try:
-            result = await db.execute_fetchall(query, values)
-            log.debug(f"User id result: {result[0][0]}")
-            log.debug(f"Channel id result: {result[0][5]}")
-        except IndexError:
-            log.debug(f"User {member.id} not found in database")
-            not_afk = discord.Embed(
-                title=f"{member.name} is not AFK", color=discord.Color.green()
-            )
-            await db.close()
-            log.debug(f"Closed database connection")
-            await ctx.respond(embed=not_afk, ephemeral=True)
-            log.info(f"Sent error message to user {ctx.user.id}")
-            return
-        else:
-            log.debug(f"User {member.id} is in the database")
-            afk = discord.Embed(
-                title=f"💤 User {member.nick} is AFK", color=discord.Color.orange()
-            )
-            if result[0][1] is not None:
-                log.debug(f"{member} has status {result[0][1]}")
-                afk.add_field(name="With status", value=result[0][1])
-            else:
-                log.debug(f"{member} has no status")
-            if result[0][2] is not None:
-                log.debug(f"{member} has has ETA until back {result[0][2]}")
-                afk.add_field(name="ETA until back", value=result[0][2])
-            else:
-                log.debug(f"{member} has no ETA until back")
-            afk.set_thumbnail(url=member.display_avatar.url)
-            afk.set_footer(
-                text=f"{member.nick} has been away for"
-                f" {await duration.time_duration(start_str=result[0][4], end_str=time.now())}"
-            )
-            await db.close()
-            log.debug(f"Closed database connection")
-            await ctx.respond(embed=afk, ephemeral=True)
-            log.info(f"Sent {member}'s afk status message to user {ctx.user.id}")
+            async with aiosqlite.connect(db_path) as db:
+                query = "SELECT * FROM Afk WHERE usr = ?"
+                result = await db.execute_fetchall(query, (member.id,))
 
-    @commands.user_command(
-        name="Check afk status", description="Check if a user is afk"
-    )
-    async def checkusr_user_command(self, ctx, member: discord.User):
+            if not result:
+                log.debug(f"User {member.id} is not in the AFK database.")
+                embed = discord.Embed(
+                    title=f"{member.name} is not AFK",
+                    color=discord.Color.green(),
+                )
+                await ctx.respond(embed=embed, ephemeral=True)
+                return
+
+            afk_data = result[0]
+            log.debug(f"User {member.id} found in the AFK database.")
+
+            embed = discord.Embed(
+                title=f"💤 {member.display_name} is AFK",
+                color=discord.Color.orange(),
+            )
+
+            if afk_data[1]:
+                embed.add_field(name="Status", value=afk_data[1], inline=False)
+            if afk_data[2]:
+                embed.add_field(name="ETA until back", value=afk_data[2], inline=False)
+
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(
+                text=f"Away for {await duration.time_duration(start_str=afk_data[4], end_str=time.now())}"
+            )
+
+            await ctx.respond(embed=embed, ephemeral=True)
+            log.info(f"Sent AFK status of {member.id} to {ctx.user.id}.")
+
+        except Exception as e:
+            log.error(f"Error checking AFK status for {member.id}: {e}")
+            embed = discord.Embed(
+                title="Error",
+                description="An unexpected error occurred while checking AFK status.",
+                color=discord.Color.red(),
+            )
+            await ctx.respond(embed=embed, ephemeral=True)
+
+    @commands.user_command(name="Check AFK Status", description="Check if a user is AFK.")
+    async def checkusr_user_command(self, ctx: discord.ApplicationContext, member: discord.User):
+        """User context menu command to check if someone is AFK."""
         await ctx.defer(ephemeral=True)
         await self.checkusr(ctx, member=member)
 
 
-def setup(bot):  # this is called by Pycord to set up the cog
-    log.debug("Running checkusr cog setup function")
-    bot.add_cog(CheckUSR(bot))  # add the cog to the bot
+def setup(bot: commands.Bot):
+    """Setup function for the CheckUSR cog."""
+    log.debug("Loading CheckUSR cog.")
+    bot.add_cog(CheckUSR(bot))
+
